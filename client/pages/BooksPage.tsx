@@ -124,6 +124,10 @@ const BooksPage = () => {
         toast(operationToast("Books could not initialize your workspace", correlationId));
         return;
       }
+      if (isPersonalWorkspace) {
+        const { error: retryError } = await supabase.rpc("retry_my_personal_books_purchases");
+        if (retryError) throw retryError;
+      }
       setOrganizationId(orgId);
       const [org, contactResult, invoiceResult, expenseResult, accountResult, taxResult, transactionResult, loyaltyPostingResult] = await Promise.all([
         supabase.from("books_organizations").select("base_currency").eq("id", orgId).single(),
