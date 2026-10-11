@@ -110,7 +110,7 @@ const MenuPage = () => {
 
       const { data: order } = await supabase
         .from("menu_orders")
-        .select("id, order_number, order_type, payment_method, tip_amount, points_discount")
+        .select("id, order_number, order_type, payment_method, tip_amount, points_discount, first_name, last_name, email, phone, room_number, delivery_address, special_requests")
         .eq("organization_id", tenant.organizationId)
         .eq("user_id", user.id)
         .eq("status", "pending")
@@ -141,6 +141,15 @@ const MenuPage = () => {
         tipAmount: Number(order.tip_amount || 0),
         tipPercentage: 0,
         usePoints: Number(order.points_discount || 0) > 0,
+        customer: {
+          firstName: order.first_name,
+          lastName: order.last_name,
+          email: order.email || "",
+          phone: order.phone,
+          roomNumber: order.room_number || "",
+          deliveryAddress: order.delivery_address || "",
+          specialRequests: order.special_requests || "",
+        },
       };
 
       setCart(restoredCart);

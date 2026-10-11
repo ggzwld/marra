@@ -132,10 +132,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     const pendingCheckout = resumableOrder || getPendingCheckout();
     if (!pendingCheckout) return;
 
-    setPendingPaymentOrder({
-      id: pendingCheckout.orderId,
-      orderNumber: pendingCheckout.orderNumber,
-    });
+    setCustomerInfo(pendingCheckout.customer);
     setOrderType(pendingCheckout.orderType);
     setPaymentMethod(pendingCheckout.paymentMethod);
     setTipAmount(pendingCheckout.tipAmount);
@@ -264,6 +261,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       tipAmount,
       tipPercentage,
       usePoints: false,
+      customer: customerSnapshot,
     });
     setIsRedirecting(true);
     // Leave the app as a full-document navigation so the provider owns the viewport.

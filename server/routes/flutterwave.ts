@@ -321,10 +321,23 @@ export const prepareFlutterwaveHostedSession = async (
     }
 
     const { secretKey } = getConfiguration();
-    const requestedTxRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
-    const attempt = await createMenuPaymentAttempt(order, requestedTxRef);
-    if (attempt.attempt_status === "redirected" && attempt.attempt_payment_url) {
-      return { paymentUrl: attempt.attempt_payment_url, txRef: attempt.attempt_tx_ref, orderId: order.id };
+    let attempt = await createMenuPaymentAttempt(order, `sheraton-${order.order_number}-${crypto.randomUUID()}`);
+    if (attempt.attempt_status === "redirected") {
+      const existingAttempt = await getPaymentAttempt(attempt.attempt_tx_ref);
+      if (existingAttempt.status !== "redirected") {
+        throw new FlutterwaveRequestError("Payment status changed. Refresh the order and try again.", 409);
+      }
+      const amountMatchesOrder = Number(existingAttempt.amount) === Number(order.total_amount)
+        && existingAttempt.currency.toUpperCase() === String(order.currency || "").toUpperCase()
+        && existingAttempt.order_id === order.id;
+      if (amountMatchesOrder && attempt.attempt_payment_url) {
+        return { paymentUrl: attempt.attempt_payment_url, txRef: attempt.attempt_tx_ref, orderId: order.id };
+      }
+      await updatePaymentAttemptAsService(existingAttempt.tx_ref, {
+        status: "failed",
+        failure_reason: "Checkout amount no longer matches the current order total",
+      });
+      attempt = await createMenuPaymentAttempt(order, `sheraton-${order.order_number}-${crypto.randomUUID()}`);
     }
     if (attempt.attempt_status === "preparing") {
       throw new FlutterwaveRequestError("Secure checkout is already being prepared. Try again shortly.", 409);
