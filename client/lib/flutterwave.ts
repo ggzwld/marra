@@ -4,6 +4,16 @@ export interface FlutterwaveHostedSession {
   orderId: string;
 }
 
+export interface MenuCheckoutCustomer {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  roomNumber: string;
+  deliveryAddress: string;
+  specialRequests: string;
+}
+
 export interface PendingCheckoutContext {
   organizationId: string;
   orderId: string;
@@ -14,6 +24,7 @@ export interface PendingCheckoutContext {
   tipAmount: number;
   tipPercentage: number;
   usePoints: boolean;
+  customer: MenuCheckoutCustomer;
 }
 
 export interface ResumableMenuOrder {
@@ -25,6 +36,7 @@ export interface ResumableMenuOrder {
   tipAmount: number;
   tipPercentage: number;
   usePoints: boolean;
+  customer: MenuCheckoutCustomer;
 }
 
 const pendingCheckoutKey = "sheraton.pending-checkout";
@@ -49,7 +61,15 @@ export const getPendingCheckout = (): PendingCheckoutContext | null => {
       !context.paymentMethod ||
       typeof context.tipAmount !== "number" ||
       typeof context.tipPercentage !== "number" ||
-      typeof context.usePoints !== "boolean"
+      typeof context.usePoints !== "boolean" ||
+      !context.customer ||
+      typeof context.customer.firstName !== "string" ||
+      typeof context.customer.lastName !== "string" ||
+      typeof context.customer.email !== "string" ||
+      typeof context.customer.phone !== "string" ||
+      typeof context.customer.roomNumber !== "string" ||
+      typeof context.customer.deliveryAddress !== "string" ||
+      typeof context.customer.specialRequests !== "string"
     ) {
       return null;
     }

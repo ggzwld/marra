@@ -408,26 +408,34 @@ const updatePaymentAttemptAsService = async (txRef, values) => {
       body: JSON.stringify({ ...values, updated_at: (/* @__PURE__ */ new Date()).toISOString() })
     }
   );
-  if (!response.ok) throw new Error("Unable to update payment attempt");
+  if (!response.ok) {
+    const details = (await response.text()).slice(0, 1e3);
+    console.error("Menu payment attempt update failed", { status: response.status, details });
+    throw new Error("Unable to update payment attempt");
+  }
 };
-const updatePendingOrderAsService = async (orderId, values, paymentReference) => {
+const confirmMenuPaymentAsService = async (orderId, txRef, transactionId) => {
   const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration$2();
-  const referenceFilter = paymentReference ? `&payment_reference=eq.${encodeURIComponent(paymentReference)}` : "";
-  const response = await fetch(
-    `${supabaseUrl}/rest/v1/menu_orders?id=eq.${encodeURIComponent(orderId)}&status=eq.pending&payment_status=eq.pending${referenceFilter}&select=id`,
-    {
-      method: "PATCH",
-      headers: {
-        apikey: supabaseAnonKey,
-        Authorization: `Bearer ${supabaseServiceRoleKey}`,
-        "content-type": "application/json",
-        prefer: "return=representation"
-      },
-      body: JSON.stringify(values)
-    }
-  );
-  if (!response.ok) throw new Error("Unable to update payment order");
-  return (await response.json()).length === 1;
+  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/confirm_menu_flutterwave_payment`, {
+    method: "POST",
+    headers: {
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${supabaseServiceRoleKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      target_order_id: orderId,
+      target_tx_ref: txRef,
+      target_transaction_id: transactionId
+    })
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload || !("paymentStatus" in payload)) {
+    const details = payload && "message" in payload ? payload.message : void 0;
+    console.error("Atomic menu payment confirmation failed", { status: response.status, details });
+    throw new Error(details || "Unable to confirm the menu payment with Supabase.");
+  }
+  return payload;
 };
 const getPaymentOptions = (paymentMethod, currency) => {
   if (paymentMethod !== "mobile-money") return "card";
@@ -462,43 +470,20 @@ const confirmPayment = async (transaction, transactionReference, order) => {
   if (Number(attempt.amount) !== Number(order.total_amount) || attempt.currency.toUpperCase() !== currency || attempt.order_id !== order.id) {
     throw new Error("Payment attempt does not match the order total");
   }
-  if (order.payment_status === "paid") {
-    if (order.flutterwave_transaction_id === String(transaction.id)) {
-      return { order, paymentStatus: "paid" };
-    }
-    await updatePaymentAttemptAsService(transactionReference, {
-      transaction_id: String(transaction.id),
-      status: "manual_review",
-      failure_reason: "A second successful payment was received for an already-paid order",
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    });
+  const confirmation = await confirmMenuPaymentAsService(order.id, transactionReference, String(transaction.id));
+  if (confirmation.paymentStatus === "manual_review") {
     return { order, paymentStatus: "manual_review" };
   }
-  const confirmed = await updatePendingOrderAsService(order.id, {
-    status: "confirmed",
-    payment_status: "paid",
-    payment_reference: transactionReference,
-    flutterwave_transaction_id: String(transaction.id)
-  });
-  if (!confirmed) {
-    const current = await getOrderByIdAsService(order.id);
-    if (current.payment_status === "paid" && current.flutterwave_transaction_id === String(transaction.id)) {
-      return { order: current, paymentStatus: "paid" };
-    }
-    await updatePaymentAttemptAsService(transactionReference, {
-      transaction_id: String(transaction.id),
-      status: "manual_review",
-      failure_reason: "A second successful payment was received for an already-paid order",
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    return { order: current, paymentStatus: "manual_review" };
-  }
-  await updatePaymentAttemptAsService(transactionReference, {
-    transaction_id: String(transaction.id),
-    status: "completed",
-    completed_at: (/* @__PURE__ */ new Date()).toISOString()
-  });
-  return { order: { ...order, payment_status: "paid", flutterwave_transaction_id: String(transaction.id) }, paymentStatus: "paid" };
+  return {
+    order: {
+      ...order,
+      status: "confirmed",
+      payment_status: "paid",
+      payment_reference: transactionReference,
+      flutterwave_transaction_id: String(transaction.id)
+    },
+    paymentStatus: "paid"
+  };
 };
 const createMenuPaymentAttempt = async (order, txRef) => {
   const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration$2();
@@ -536,10 +521,21 @@ const prepareFlutterwaveHostedSession = async ({ orderId }, authorization, tenan
       throw new FlutterwaveRequestError("An email address is required for online payment.", 400);
     }
     const { secretKey } = getConfiguration$2();
-    const requestedTxRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
-    const attempt = await createMenuPaymentAttempt(order, requestedTxRef);
-    if (attempt.attempt_status === "redirected" && attempt.attempt_payment_url) {
-      return { paymentUrl: attempt.attempt_payment_url, txRef: attempt.attempt_tx_ref, orderId: order.id };
+    let attempt = await createMenuPaymentAttempt(order, `sheraton-${order.order_number}-${crypto.randomUUID()}`);
+    if (attempt.attempt_status === "redirected") {
+      const existingAttempt = await getPaymentAttempt(attempt.attempt_tx_ref);
+      if (existingAttempt.status !== "redirected") {
+        throw new FlutterwaveRequestError("Payment status changed. Refresh the order and try again.", 409);
+      }
+      const amountMatchesOrder = Number(existingAttempt.amount) === Number(order.total_amount) && existingAttempt.currency.toUpperCase() === String(order.currency || "").toUpperCase() && existingAttempt.order_id === order.id;
+      if (amountMatchesOrder && attempt.attempt_payment_url) {
+        return { paymentUrl: attempt.attempt_payment_url, txRef: attempt.attempt_tx_ref, orderId: order.id };
+      }
+      await updatePaymentAttemptAsService(existingAttempt.tx_ref, {
+        status: "failed",
+        failure_reason: "Checkout amount no longer matches the current order total"
+      });
+      attempt = await createMenuPaymentAttempt(order, `sheraton-${order.order_number}-${crypto.randomUUID()}`);
     }
     if (attempt.attempt_status === "preparing") {
       throw new FlutterwaveRequestError("Secure checkout is already being prepared. Try again shortly.", 409);
