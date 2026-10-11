@@ -222,24 +222,5 @@ end;
 $$;
 revoke all on function public.apply_hotel_loyalty_delta(uuid, uuid, text, bigint, text, uuid, text) from public, anon, authenticated;
 
-do $$
-declare
-  purchase_row record;
-  award_row record;
-begin
-  for purchase_row in
-    select id from public.books_personal_purchase_records where status in ('pending', 'failed') order by created_at
-  loop
-    perform public.process_personal_books_purchase_record(purchase_row.id);
-  end loop;
-
-  for award_row in
-    select id from public.hotel_loyalty_award_queue where status = 'failed' order by created_at
-  loop
-    perform public.process_hotel_loyalty_award(award_row.id);
-  end loop;
-end;
-$$;
-
 notify pgrst, 'reload schema';
 commit;
