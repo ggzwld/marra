@@ -10,6 +10,11 @@ declare
   purchase_row public.books_personal_purchase_records%rowtype;
   target_personal_organization_id uuid;
   target_expense_id uuid;
+  target_vendor_name text;
+  target_vendor_contact_id uuid;
+  expense_description text;
+  item_details text;
+  menu_order public.menu_orders%rowtype;
 begin
   select * into purchase_row
     from public.books_personal_purchase_records
@@ -27,12 +32,49 @@ begin
     return 'failed';
   end if;
 
+  select organization.name
+    into target_vendor_name
+    from public.books_organizations organization
+   where organization.id = purchase_row.hotel_organization_id;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'personal-books-vendor:' || target_personal_organization_id::text || ':' || lower(target_vendor_name), 0
+  ));
+  select contact.id into target_vendor_contact_id
+    from public.books_contacts contact
+   where contact.organization_id = target_personal_organization_id
+     and lower(contact.name) = lower(target_vendor_name)
+     and contact.type in ('vendor', 'both')
+   order by contact.created_at
+   limit 1;
+  if target_vendor_contact_id is null then
+    insert into public.books_contacts (organization_id, name, type)
+    values (target_personal_organization_id, target_vendor_name, 'vendor')
+    returning id into target_vendor_contact_id;
+  end if;
+
+  expense_description := purchase_row.description;
+  if purchase_row.source_type = 'menu_order' then
+    select * into menu_order from public.menu_orders where id = purchase_row.source_id;
+    select string_agg(
+      format('%s (%s × %s)', item.item_name, item.quantity, to_char(item.unit_price, 'FM999999999999990D00')),
+      ', ' order by item.created_at, item.id
+    ) into item_details
+      from public.menu_order_items item
+     where item.order_id = purchase_row.source_id;
+    expense_description := concat_ws(' — ', purchase_row.description, nullif(item_details, '')) ||
+      ' | Subtotal: ' || to_char(menu_order.subtotal, 'FM999999999999990D00') || ' ' || purchase_row.currency_code ||
+      '; tax: ' || to_char(menu_order.tax_amount, 'FM999999999999990D00') || ' ' || purchase_row.currency_code ||
+      '; service fee: ' || to_char(menu_order.service_fee, 'FM999999999999990D00') || ' ' || purchase_row.currency_code ||
+      '; tip: ' || to_char(menu_order.tip_amount, 'FM999999999999990D00') || ' ' || purchase_row.currency_code;
+  end if;
+
   insert into public.books_expenses (
-    organization_id, description, expense_date, currency_code, amount, tax_amount,
+    organization_id, contact_id, description, expense_date, currency_code, amount, tax_amount,
     payment_status, purchase_source_type, purchase_source_id
   ) values (
     target_personal_organization_id,
-    purchase_row.description,
+    target_vendor_contact_id,
+    expense_description,
     purchase_row.purchase_date,
     purchase_row.currency_code,
     purchase_row.amount,
@@ -141,6 +183,58 @@ begin
 end;
 $$;
 revoke all on function public.apply_hotel_loyalty_delta(uuid, uuid, text, bigint, text, uuid, text) from public, anon, authenticated;
+
+alter table public.notifications drop constraint if exists notifications_type_check;
+alter table public.notifications
+  add constraint notifications_type_check
+  check (type in (
+    'complaint_filed', 'complaint_acknowledged', 'task_created', 'task_updated',
+    'task_assigned', 'task_accepted', 'task_declined', 'task_proposed',
+    'proposal_accepted', 'proposal_declined', 'proposal_updated', 'todo_created',
+    'task_message', 'report_submitted', 'evidence_approved', 'issue_raised', 'issue_resolved',
+    'task_flagged', 'task_approval_ready',
+    'event_proposal_submitted', 'event_proposal_updated', 'event_proposal_scheduled',
+    'event_proposal_declined', 'event_published',
+    'event_invitation_received', 'event_invitation_responded',
+    'personal_purchase_recorded', 'hotel_purchase_recorded',
+    'personal_purchase_refunded', 'hotel_loyalty_activity'
+  ));
+
+do $$
+declare
+  order_row public.menu_orders%rowtype;
+  award_queue_id uuid;
+begin
+  select * into order_row
+    from public.menu_orders
+   where id = '94a92dba-a347-4118-a97c-e618183553db'
+     and payment_status = 'paid';
+  if not found then return; end if;
+
+  if exists (
+    select 1 from auth.users auth_user
+     where auth_user.id = order_row.user_id and not auth_user.is_anonymous
+  ) then
+    perform public.enqueue_personal_books_purchase(
+      'menu_order', order_row.id, order_row.user_id, order_row.organization_id,
+      order_row.total_amount, order_row.currency, order_row.created_at::date,
+      'menu order ' || order_row.order_number,
+      '/books?organization=' || order_row.organization_id::text
+    );
+  else
+    raise notice 'Personal Books recovery skipped because this buyer has no registered account';
+  end if;
+
+  select queue.id into award_queue_id
+    from public.hotel_loyalty_award_queue queue
+   where queue.organization_id = order_row.organization_id
+     and queue.source_type = 'menu_order'
+     and queue.source_id = order_row.id;
+  if award_queue_id is not null then
+    perform public.process_hotel_loyalty_award(award_queue_id);
+  end if;
+end;
+$$;
 
 notify pgrst, 'reload schema';
 commit;
